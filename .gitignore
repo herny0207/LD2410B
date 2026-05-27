@@ -1,26 +1,26 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Ignore everything by default
+*
 
-# C++ build directories
-.pio/
-.clangd/
-*.o
-*.a
-*.la
-*.lo
+# Except these directories
+!/MyLD2410/
+/MyLD2410/*
+!/MyLD2410/Myversion/
+!/MyLD2410/Myversion/**
 
-# IDEs and editors
-.vscode/
-.idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+!/trainModel/
+!/trainModel/**
 
-# OS generated files
-Thumbs.db
-ehthumbs.db
-Desktop.ini
+!/trainModel2/
+!/trainModel2/**
+
+# Except these files
+!/data_0_idle.csv
+!/data_1_close.csv
+!/data_2_far.csv
+!/radar_model.pkl
+!/.gitignore
+
+# Ignore python caches inside accepted directories
+**/__pycache__/
+**/*.pyc
+**/radar_model.pkl.backup
