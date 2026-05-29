@@ -12,6 +12,7 @@ BAUD_RATE = 115200
 script_dir   = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH   = os.path.join(script_dir, 'radar_model.pkl')
 FEATURE_PATH = os.path.join(script_dir, 'feature_columns.pkl')
+SCALER_PATH  = os.path.join(script_dir, 'radar_scaler.pkl')  # 👈 1. 新增：標準化器路徑
 # ==========================================
 
 # --- 前處理：原始特徵欄位定義 ---
@@ -19,10 +20,9 @@ MOTION_COLS = [f"g{i}_m" for i in range(9)]   # g0_m ~ g8_m
 STATIC_COLS = [f"g{i}_s" for i in range(9)]   # g0_s ~ g8_s
 BASE_COLS   = MOTION_COLS + STATIC_COLS        # 18 個原始特徵
 
-# 平滑用的小型環形緩衝 (window=3)
-SMOOTH_WINDOW = 3
-smooth_buffer = []   # 存最近 SMOOTH_WINDOW 筆原始特徵（各 18 維）
-
+# 👈 2. 修改：EWMA 平滑參數（與訓練集前處理一模一樣）
+EWMA_ALPHA = 0.6
+ewma_current = None  # 用來記錄上一幀平滑後的狀態
 
 def apply_statistical_features(raw_18: np.ndarray) -> np.ndarray:
     """
@@ -33,29 +33,36 @@ def apply_statistical_features(raw_18: np.ndarray) -> np.ndarray:
     static = raw_18[9:18]
 
     stats = np.array([
-        motion.mean(),                     # motion_mean
-        motion.std(),                      # motion_std
-        motion.max() - motion.min(),       # motion_range
-        static.mean(),                     # static_mean
-        static.std(),                      # static_std
-        static.max() - static.min(),       # static_range
+        motion.mean(),                      # motion_mean
+        motion.std(),                       # motion_std
+        motion.max() - motion.min(),        # motion_range
+        static.mean(),                      # static_mean
+        static.std(),                       # static_std
+        static.max() - static.min(),        # static_range
     ])
     return np.concatenate([raw_18, stats])
 
 
-# 載入模型與特徵欄位
+# 載入模型、特徵欄位與標準化器
 try:
     model = joblib.load(MODEL_PATH)
     print(f"[OK] 成功載入 AI 模型: {MODEL_PATH}")
 except FileNotFoundError:
-    print(f"[Error] 找不到模型檔案 '{MODEL_PATH}'，請先執行 train_radar_model.py 進行訓練！")
+    print(f"[Error] 找不到模型檔案 '{MODEL_PATH}'，請先執行訓練系統！")
+    exit()
+
+try:
+    scaler = joblib.load(SCALER_PATH)  # 👈 3. 新增：強烈要求載入 Scaler
+    print(f"[OK] 成功載入特徵標準化器: {SCALER_PATH}")
+except FileNotFoundError:
+    print(f"[Error] 找不到標準化檔案 '{SCALER_PATH}'，請確認訓練系統是否有匯出！")
     exit()
 
 if os.path.exists(FEATURE_PATH):
     feature_columns = joblib.load(FEATURE_PATH)
     print(f"[OK] 特徵欄位已載入（{len(feature_columns)} 維）")
 else:
-    print("[Warning] 找不到 feature_columns.pkl，將直接使用 24 維特徵（請確認模型訓練版本）")
+    print("[Warning] 找不到 feature_columns.pkl，將直接使用 24 維特徵")
     feature_columns = None
 
 # 開啟序列埠
@@ -85,19 +92,22 @@ try:
                     # 1) 提取原始 18 個特徵
                     raw_18 = np.array([int(x) for x in parts[0:18]], dtype=float)
 
-                    # 2) 移動平均平滑（window=3）
-                    smooth_buffer.append(raw_18)
-                    if len(smooth_buffer) > SMOOTH_WINDOW:
-                        smooth_buffer.pop(0)
-                    smoothed_18 = np.mean(smooth_buffer, axis=0)
-
+                    # 2) 👈 修改：改用 EWMA 指數加權移動平滑，摒棄 Center Rolling Mean
+                    if ewma_current is None:
+                        ewma_current = raw_18  # 第一幀初始化
+                    else:
+                        ewma_current = EWMA_ALPHA * raw_18 + (1 - EWMA_ALPHA) * ewma_current
+                    
                     # 3) 加入統計特徵 (18 -> 24 維)
-                    features_24 = apply_statistical_features(smoothed_18)
-                    features = features_24.reshape(1, -1)
+                    features_24 = apply_statistical_features(ewma_current)
+                    
+                    # 4) 👈 修正：特徵標準化轉換 (這步沒做，SVM/MLP 預測會完全失準！)
+                    # scaler.transform 必須吃 2D 陣列 [[...]]
+                    features_scaled = scaler.transform(features_24.reshape(1, -1))
 
-                    # 4) 進行預測
-                    pred_class    = model.predict(features)[0]
-                    probabilities = model.predict_proba(features)[0]
+                    # 5) 進行預測 (改用經過標準化後的特徵)
+                    pred_class    = model.predict(features_scaled)[0]
+                    probabilities = model.predict_proba(features_scaled)[0]
 
                     # 清除終端機畫面
                     os.system('cls' if os.name == 'nt' else 'clear')
@@ -106,7 +116,7 @@ try:
                     print("     HLK-LD2410B AI 即時距離類別預測（含前處理）")
                     print("=" * 50)
                     print(f"當前預測結果: \033[1;36m{classes[pred_class]}\033[0m")
-                    print(f"特徵維度: 18 原始 + 6 統計 = 24 維 | 平滑窗口: {len(smooth_buffer)}/{SMOOTH_WINDOW}")
+                    print(f"特徵維度: 18 原始 + 6 統計 = 24 維 | 平滑模式: EWMA (α={EWMA_ALPHA})")
                     print("-" * 50)
 
                     for idx, (label, prob) in enumerate(zip(classes, probabilities)):
@@ -119,7 +129,7 @@ try:
 
             except Exception as e:
                 pass
-        time.sleep(0.05)
+        time.sleep(0.02) # 👈 降低微調時延，搭配雷達 0.2 秒的發送頻率，能做到更即時
 except KeyboardInterrupt:
     print("\n[Info] 已停止即時預測。")
 finally:
